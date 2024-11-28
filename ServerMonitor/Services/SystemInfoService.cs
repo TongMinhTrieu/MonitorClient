@@ -13,7 +13,7 @@ public class SystemInfoService : BackgroundService
 
     private readonly PerformanceCounter _cpuCounter;
     private readonly PerformanceCounter _ramCounter;
-    private readonly TimeSpan _reconnectInterval = TimeSpan.FromSeconds(5); // Thời gian chờ giữa các lần thử kết nối lại
+    private readonly TimeSpan _reconnectInterval = TimeSpan.FromSeconds(2); // Thời gian chờ giữa các lần thử kết nối lại
     public SystemInfoService(IConfiguration configuration)
     {
         _webSocketUrl = configuration["WebSocket:Url"];
@@ -32,6 +32,16 @@ public class SystemInfoService : BackgroundService
                 {
                     Console.WriteLine("Attempting to connect to WebSocket server...");
                     await ConnectWebSocketAsync(stoppingToken);
+                }
+                else
+                {
+                    // Gửi yêu cầu ping nếu WebSocket đang ở trạng thái Open
+                    // Đảm bảo kết nối thực sự vẫn ổn
+                    if (!await IsWebSocketStillConnected())
+                    {
+                        Console.WriteLine("WebSocket is not responding, reconnecting...");
+                        await ConnectWebSocketAsync(stoppingToken);
+                    }
                 }
                 // Lấy địa chỉ IP của client
                 string clientIp = GetLocalIpAddress();
@@ -90,23 +100,51 @@ public class SystemInfoService : BackgroundService
                 // Nếu có lỗi, đợi một khoảng thời gian trước khi thử lại kết nối
                 await Task.Delay(_reconnectInterval, stoppingToken);
             }
+            await Task.Delay(2000, stoppingToken); // Đảm bảo client tiếp tục kiểm tra mỗi giây
         }
+    }
+    private async Task<bool> IsWebSocketStillConnected()
+    {
+        try
+        {
+            if (_webSocketClient.State == WebSocketState.Open)
+            {
+                // Gửi một ping đơn giản đến server để xác nhận kết nối
+                var buffer = new byte[1]; // Dữ liệu nhỏ để "ping"
+                await _webSocketClient.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Binary, true, CancellationToken.None);
+
+                // Đợi phản hồi trong một khoảng thời gian hợp lý
+                var receiveBuffer = new byte[1];
+                var result = await _webSocketClient.ReceiveAsync(new ArraySegment<byte>(receiveBuffer), CancellationToken.None);
+
+                // Nếu không có lỗi và có phản hồi, coi như WebSocket còn sống
+                return result.MessageType != WebSocketMessageType.Close;
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Ping error: {ex.Message}");
+        }
+        // Nếu có lỗi hoặc không nhận được phản hồi, coi như kết nối đã ngắt
+        return false;
     }
     private async Task ConnectWebSocketAsync(CancellationToken stoppingToken)
     {
-        _webSocketClient = new ClientWebSocket();
-
+        // Kết nối lại WebSocket khi không có kết nối
         try
         {
-            // Cố gắng kết nối tới WebSocket server
+            _webSocketClient = new ClientWebSocket();
             await _webSocketClient.ConnectAsync(new Uri(_webSocketUrl), stoppingToken);
             Console.WriteLine("WebSocket connected to " + _webSocketUrl);
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Error connecting to WebSocket: {ex.Message}");
+            Console.WriteLine("Error connecting to WebSocket: " + ex.Message);
+            // Đợi một khoảng thời gian trước khi thử lại kết nối
+            await Task.Delay(_reconnectInterval, stoppingToken);
         }
     }
+
     private string GetNetworkStats()
     {
         try

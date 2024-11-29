@@ -13,10 +13,14 @@ public class SystemInfoService : BackgroundService
 
     private readonly PerformanceCounter _cpuCounter;
     private readonly PerformanceCounter _ramCounter;
-    private readonly TimeSpan _reconnectInterval = TimeSpan.FromSeconds(2); // Thời gian chờ giữa các lần thử kết nối lại
+    private readonly int _reconnect; // Thời gian chờ giữa các lần thử kết nối lại
+    private readonly int _period;   // Chu kỳ gửi
+
     public SystemInfoService(IConfiguration configuration)
     {
         _webSocketUrl = configuration["WebSocket:Url"];
+        _period = int.Parse(configuration["Time:period"]);
+        _reconnect = int.Parse(configuration["Time:reconnect"]);
         _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
         _ramCounter = new PerformanceCounter("Memory", "Available MBytes");
     }
@@ -92,15 +96,15 @@ public class SystemInfoService : BackgroundService
 
                 // Reset bộ đếm lần gọi API mỗi phút
                 RequestCounterMiddleware.ResetCounter();
-                await Task.Delay(2000, stoppingToken); // Cập nhật thời gian gửi theo chu kỳ (mỗi 2 giây)
+
             }
             catch (Exception ex)
             {
                 Console.WriteLine("Error: " + ex.Message);
                 // Nếu có lỗi, đợi một khoảng thời gian trước khi thử lại kết nối
-                await Task.Delay(_reconnectInterval, stoppingToken);
+                await Task.Delay(_reconnect, stoppingToken);
             }
-            await Task.Delay(2000, stoppingToken); // Đảm bảo client tiếp tục kiểm tra mỗi giây
+            await Task.Delay(_period, stoppingToken); // Đảm bảo client tiếp tục kiểm tra mỗi giây
         }
     }
     private async Task<bool> IsWebSocketStillConnected()
@@ -141,7 +145,7 @@ public class SystemInfoService : BackgroundService
         {
             Console.WriteLine("Error connecting to WebSocket: " + ex.Message);
             // Đợi một khoảng thời gian trước khi thử lại kết nối
-            await Task.Delay(_reconnectInterval, stoppingToken);
+            await Task.Delay(_reconnect, stoppingToken);
         }
     }
 

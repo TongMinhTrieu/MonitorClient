@@ -1,7 +1,9 @@
 ﻿using ServerMonitor.Middlewares;
 using ServerMonitor.Models;
 using System.Diagnostics;
+using System.Net;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 
@@ -171,19 +173,16 @@ public class SystemInfoService : BackgroundService
 
         return "N/A";
     }
-    public string GetLocalIpAddress()
+    public static string GetLocalIpAddress()
     {
-        string localIp = string.Empty;
-        foreach (var networkInterface in System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces())
+        string localIp = string.Empty; // Địa chỉ mặc định nếu không tìm thấy IPv4
+        foreach (var networkInterface in Dns.GetHostEntry(Dns.GetHostName()).AddressList)
         {
-            var ipProperties = networkInterface.GetIPProperties();
-            foreach (var ipAddress in ipProperties.UnicastAddresses)
+            // Kiểm tra địa chỉ IPv4 không phải loopback
+            if (networkInterface.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(networkInterface))
             {
-                if (ipAddress.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
-                {
-                    localIp = ipAddress.Address.ToString();
-                    break;
-                }
+                localIp = networkInterface.ToString();
+                break;
             }
         }
         return localIp;

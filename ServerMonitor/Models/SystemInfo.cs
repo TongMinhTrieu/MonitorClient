@@ -8,6 +8,7 @@
         public float StorageUsage { get; set; }
         public float NetworkSpeed { get; set; }
         public List<object> ApiStatistics { get; set; } // Chứa danh sách API và số lượng yêu cầu
+        public List<string> ListDatabases { get; set; }
         public DateTime DateStamp { get; set; }
     }
 }

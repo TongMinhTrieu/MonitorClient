@@ -1,7 +1,7 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
 using ServerMonitor.Middlewares;
 
-var builder = Host.CreateApplicationBuilder(args);
+var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddWindowsService(options =>
 {
@@ -15,6 +15,11 @@ builder.Services.AddControllers();
 
 builder.Services.AddEndpointsApiExplorer();
 
-IHost app = builder.Build();
+var app = builder.Build();
+app.UseMiddleware<ApiMonitoringMiddleware>();
+app.UseMiddleware<ErrorRateMiddleware>();
+app.UseMiddleware<RequestCounterMiddleware>();
+app.UseMiddleware<ResponseTimeMiddleware>();
+app.UseMiddleware<WebSocketMiddleware>();
 
 app.Run();

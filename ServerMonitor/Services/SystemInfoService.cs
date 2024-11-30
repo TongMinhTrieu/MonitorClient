@@ -6,12 +6,16 @@ using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
+using System;
+using System.Collections.Generic;
+using Microsoft.Data.SqlClient;
 
 
 public class SystemInfoService : BackgroundService
 {
     private readonly string _webSocketUrl; // Địa chỉ server WebSocket
     private ClientWebSocket _webSocketClient;
+    private readonly List<string> listDatabases;
 
     private readonly PerformanceCounter _cpuCounter;
     private readonly PerformanceCounter _ramCounter;
@@ -25,6 +29,7 @@ public class SystemInfoService : BackgroundService
         _reconnect = int.Parse(configuration["Time:reconnect"]);
         _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
         _ramCounter = new PerformanceCounter("Memory", "Available MBytes");
+        listDatabases = GetDatabases(configuration["ConnectionStrings:Default"]);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -61,7 +66,7 @@ public class SystemInfoService : BackgroundService
                 var totalSpace = driveInfo.TotalSize / (1024 * 1024 * 1024);
 
                 var networkStats = GetNetworkStats();
-                var apiStats = ApiMonitoringMiddleware.GetApiStatistics();
+                var apiStats = ApiMonitoringMiddleware.GetApiStatistics(); 
                 var formattedStats = apiStats.Select(kvp => new { Api = kvp.Key, Calls = kvp.Value }).ToList();
 
                 // Chuẩn bị dữ liệu JSON để gửi qua WebSocket
@@ -74,6 +79,7 @@ public class SystemInfoService : BackgroundService
                     DiskTotalSpace = $"{totalSpace:F2}",
                     NetworkSpeed = $"{networkStats:F2}",
                     ApiStatistics = formattedStats,
+                    ListDatabases = listDatabases,
                     DateStamp = DateTime.Now
                 };
 
@@ -170,7 +176,6 @@ public class SystemInfoService : BackgroundService
         {
             Console.WriteLine($"{ex.Message}");
         }
-
         return "N/A";
     }
     public static string GetLocalIpAddress()
@@ -186,5 +191,23 @@ public class SystemInfoService : BackgroundService
             }
         }
         return localIp;
+    }
+    public static List<string> GetDatabases(string connectionString)
+    {
+        var databases = new List<string>();
+        using (var connection = new SqlConnection(connectionString))
+        {
+            connection.Open();
+            var command = new SqlCommand("SELECT name FROM sys.databases WHERE state = 0", connection); // state = 0: Online
+
+            using (var reader = command.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    databases.Add(reader.GetString(0));
+                }
+            }
+        }
+        return databases;
     }
 }

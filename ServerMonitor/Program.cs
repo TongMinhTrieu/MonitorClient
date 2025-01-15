@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using ServerMonitor.Middlewares;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -9,6 +10,7 @@ builder.Services.AddWindowsService(options =>
 });
 // Add services to the container.
 builder.Services.AddHostedService<SystemInfoService>();
+
 builder.Services.AddControllers();
 
 // Đăng ký PerformanceService và SqlRepository
@@ -16,7 +18,9 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 
 var app = builder.Build();
-app.UseMiddleware<ApiMonitoringMiddleware>();
+// Thiết lập route cho proxy
+
+//app.UseMiddleware<ApiMonitoringMiddleware>();
 app.UseMiddleware<ErrorRateMiddleware>();
 app.UseMiddleware<RequestCounterMiddleware>();
 app.UseMiddleware<ResponseTimeMiddleware>();

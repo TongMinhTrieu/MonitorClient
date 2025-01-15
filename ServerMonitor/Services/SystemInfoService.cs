@@ -9,6 +9,14 @@ using System.Text;
 using System;
 using System.Collections.Generic;
 using Microsoft.Data.SqlClient;
+using System.Management;
+using PacketDotNet;
+using SharpPcap;
+using PacketDotNet.Ieee80211;
+using PcapDotNet.Packets;
+using System.Text.RegularExpressions;
+using static System.Net.Mime.MediaTypeNames;
+using static System.Net.WebRequestMethods;
 
 
 public class SystemInfoService : BackgroundService
@@ -22,6 +30,10 @@ public class SystemInfoService : BackgroundService
     private readonly int _reconnect; // Thời gian chờ giữa các lần thử kết nối lại
     private readonly int _period;   // Chu kỳ gửi
 
+    private Dictionary<string, int> _requestCounts = new Dictionary<string, int>();
+
+    private readonly List<string> _listAPI = new List<string>();
+
     public SystemInfoService(IConfiguration configuration)
     {
         _webSocketUrl = configuration["WebSocket:Url"];
@@ -34,6 +46,17 @@ public class SystemInfoService : BackgroundService
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        // Lấy danh sách các adapter mạng
+        var devices = CaptureDeviceList.Instance;
+        if (devices.Count < 1)
+        {
+            Console.WriteLine("No devices found!");
+            return;
+        }
+
+        // Chọn adapter đầu tiên (có thể thay đổi logic tùy nhu cầu)
+        ICaptureDevice selectedAdapter = GetAdapterWithKeyword();
+        
         while (!stoppingToken.IsCancellationRequested)
         {
             try
@@ -54,6 +77,24 @@ public class SystemInfoService : BackgroundService
                         await ConnectWebSocketAsync(stoppingToken);
                     }
                 }
+
+                // Tạo một luồng riêng để bắt gói tin
+                if (selectedAdapter != null)
+                {
+                    selectedAdapter.StopCapture();
+                    selectedAdapter.Close();
+                    // Sau đó có thể mở và sử dụng adapter này
+                    selectedAdapter.Open();
+
+                    // Nếu cần bắt gói tin
+                    selectedAdapter.OnPacketArrival += new PacketArrivalEventHandler(Device_OnPacketArrival);
+                    selectedAdapter.StartCapture();                   
+                }
+                else
+                {
+                    Console.WriteLine("No suitable adapter found.");
+                }
+
                 // Lấy địa chỉ IP của client
                 string clientIp = GetLocalIpAddress();
 
@@ -65,22 +106,27 @@ public class SystemInfoService : BackgroundService
                 var freeSpace = driveInfo.AvailableFreeSpace / (1024 * 1024 * 1024);
                 var totalSpace = driveInfo.TotalSize / (1024 * 1024 * 1024);
 
-                var networkStats = GetNetworkStats();
-                var apiStats = ApiMonitoringMiddleware.GetApiStatistics(); 
-                var formattedStats = apiStats.Select(kvp => new { Api = kvp.Key, Calls = kvp.Value }).ToList();
-
+                var networkStats = GetNetworkSpeed();
+                // Chuyển đổi dictionary thành danh sách (hoặc một chuỗi, nếu cần)
+                var networkSpeedFormatted = networkStats.Select(ni => new
+                {
+                    NetworkInterface = ni.Key,
+                    ReceiveSpeed = $"{ni.Value.receiveKbps:F2} Kbps",
+                    SendSpeed = $"{ni.Value.sendKbps:F2} Kbps"
+                }).ToList();
+                
                 // Chuẩn bị dữ liệu JSON để gửi qua WebSocket
                 var systemInfo = new
                 {
                     ClientIp = clientIp,
+                    DateStamp = DateTime.Now,
                     CpuUsage = $"{cpuUsage:F2}",
                     MemoryAvailable = $"{memoryUsage:F2}",
                     DiskFreeSpace = $"{freeSpace:F2}",
                     DiskTotalSpace = $"{totalSpace:F2}",
-                    NetworkSpeed = $"{networkStats:F2}",
-                    ApiStatistics = formattedStats,
-                    ListDatabases = listDatabases,
-                    DateStamp = DateTime.Now
+                    NetworkSpeed = networkSpeedFormatted,
+                    ApiStatistics = _requestCounts,
+                    ListDatabases = listDatabases
                 };
 
                 var jsonMessage = System.Text.Json.JsonSerializer.Serialize(systemInfo);
@@ -96,14 +142,13 @@ public class SystemInfoService : BackgroundService
                         stoppingToken
                     );
                     Console.WriteLine("Sent: " + jsonMessage);
+                    _requestCounts.Clear();
                 }
+                
                 else
                 {
                     Console.WriteLine("WebSocket is not connected.");
                 }
-
-                // Reset bộ đếm lần gọi API mỗi phút
-                RequestCounterMiddleware.ResetCounter();
 
             }
             catch (Exception ex)
@@ -112,9 +157,13 @@ public class SystemInfoService : BackgroundService
                 // Nếu có lỗi, đợi một khoảng thời gian trước khi thử lại kết nối
                 await Task.Delay(_reconnect, stoppingToken);
             }
-            await Task.Delay(_period, stoppingToken); // Đảm bảo client tiếp tục kiểm tra mỗi giây
+            
+            await Task.Delay(5000, stoppingToken); // Đảm bảo client tiếp tục kiểm tra mỗi giây
         }
     }
+
+
+
     private async Task<bool> IsWebSocketStillConnected()
     {
         try
@@ -157,34 +206,87 @@ public class SystemInfoService : BackgroundService
         }
     }
 
-    private string GetNetworkStats()
+    private void Device_OnPacketArrival(object sender, PacketCapture e)
     {
         try
         {
-            var networkInterfaces = NetworkInterface.GetAllNetworkInterfaces();
-            foreach (var ni in networkInterfaces)
+            // Lấy dữ liệu gói tin
+            var rawPacket = e.GetPacket();
+            var packet = PacketDotNet.Packet.ParsePacket(rawPacket.LinkLayerType, rawPacket.Data);
+
+            // Kiểm tra xem có phải là gói tin IP không
+            var ipPacket = packet.PayloadPacket as IPv6Packet; //ethernetPacket
+            if (ipPacket != null)
             {
-                if (ni.OperationalStatus == OperationalStatus.Up)
+                var tcpPacket = ipPacket.PayloadPacket as TcpPacket;
+
+                if (tcpPacket != null)
                 {
-                    var statistics = ni.GetIPv4Statistics();
-                    var speedMbps = ni.Speed / (1024.0 * 1024.0); // Mbps
-                    return $"{speedMbps:F2}";
+                    var payload = Encoding.ASCII.GetString(tcpPacket.PayloadData);
+
+                    // Kiểm tra nếu payload là HTTP GET hoặc các yêu cầu HTTP khác
+                    if (Regex.IsMatch(payload, @"^(GET|POST|PUT|DELETE) "))
+                    {
+                        // Trích xuất phương thức và đường dẫn
+                        var methodAndPath = Regex.Match(payload, @"^(GET|POST|PUT|DELETE) (/.*) HTTP/1.1");
+                        var host = Regex.Match(payload, @"Host:\s*(\S+)");
+
+                        if (methodAndPath.Success && host.Success)
+                        {
+                            // Gộp thành một dòng duy nhất:
+                            string result = $"{methodAndPath.Groups[1].Value} {host.Groups[1].Value}{methodAndPath.Groups[2].Value} HTTP/1.1";
+                            if (_requestCounts.ContainsKey(result))
+                            {
+                                _requestCounts[result]++;
+                            }
+                            else
+                            {
+                                _requestCounts[result] = 1;
+                            }
+                            // Thêm kết quả vào list
+                        }
+                    }
                 }
             }
+
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"{ex.Message}");
+            Console.WriteLine($"Error while processing packet: {ex.Message}");
         }
-        return "N/A";
     }
+
+    public ICaptureDevice GetAdapterWithKeyword()
+    {
+        // Lấy tất cả các adapter mạng
+        var devices = CaptureDeviceList.Instance;
+        if (devices.Count < 1)
+        {
+            Console.WriteLine("No devices found!");
+            return null;
+        }
+        string keyword = "Adapter for loopback traffic capture";
+        // Lọc các adapter có chứa từ khóa trong tên hoặc mô tả
+        var filteredDevices = devices.FirstOrDefault(d => d.Description != null && d.Description.ToLower().Contains(keyword.ToLower()));
+
+        if (filteredDevices != null)
+        {
+            Console.WriteLine($"Select a device containing the keyword '{keyword}':");
+            Console.WriteLine($" {filteredDevices.Description}");
+
+            return filteredDevices;
+        }
+
+        return null;
+    }
+
     public static string GetLocalIpAddress()
     {
         string localIp = string.Empty; // Địa chỉ mặc định nếu không tìm thấy IPv4
         foreach (var networkInterface in Dns.GetHostEntry(Dns.GetHostName()).AddressList)
         {
             // Kiểm tra địa chỉ IPv4 không phải loopback
-            if (networkInterface.AddressFamily == AddressFamily.InterNetwork && !IPAddress.IsLoopback(networkInterface))
+            if (networkInterface.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !IPAddress.IsLoopback(networkInterface))
             {
                 localIp = networkInterface.ToString();
                 break;
@@ -192,6 +294,7 @@ public class SystemInfoService : BackgroundService
         }
         return localIp;
     }
+
     public static List<string> GetDatabases(string connectionString)
     {
         var databases = new List<string>();
@@ -210,4 +313,102 @@ public class SystemInfoService : BackgroundService
         }
         return databases;
     }
+
+    // Hàm trả về Dictionary chứa tốc độ gửi và nhận của tất cả các card mạng
+    public Dictionary<string, (double receiveKbps, double sendKbps)> GetNetworkSpeed()
+    {
+        var networkSpeeds = new Dictionary<string, (double receiveKbps, double sendKbps)>();
+
+        // Lấy tất cả các card mạng hoạt động
+        var interfaces = NetworkInterface.GetAllNetworkInterfaces()
+            .Where(ni => ni.OperationalStatus == OperationalStatus.Up &&
+                         (ni.NetworkInterfaceType == NetworkInterfaceType.Ethernet ||
+                          ni.NetworkInterfaceType == NetworkInterfaceType.Wireless80211))
+            .ToList();
+
+        if (!interfaces.Any())
+        {
+            Console.WriteLine("No active network interfaces found.");
+            return networkSpeeds;
+        }
+
+        // Tính tổng tốc độ gửi và nhận cho tất cả các card mạng
+        foreach (var ni in interfaces)
+        {
+            ManagementObjectSearcher searcher = new ManagementObjectSearcher("SELECT * FROM Win32_PerfFormattedData_Tcpip_NetworkInterface");
+
+            foreach (var obj in searcher.Get())
+            {
+                var name = obj["Name"];
+                var sentBytes = Convert.ToDouble(obj["BytesSentPerSec"]) / 1024;
+                var receivedBytes = Convert.ToDouble(obj["BytesReceivedPerSec"]) / 1024;
+                networkSpeeds[obj["Name"].ToString()] = (sentBytes, receivedBytes);
+            }
+        }
+
+        // Trả về Dictionary chứa tốc độ của tất cả các card mạng
+        return networkSpeeds;
+    }
+
+
+    // FireWall
+    //public static SystemSecurityInfo GetSecurityInfo()
+    //{
+    //    // Khởi tạo thông tin kết quả
+    //    string firewallStatus = "inactive";
+    //    int blockedAttempts = 15; // Giả sử số lần bị chặn cố gắng đăng nhập (có thể lấy từ cơ sở dữ liệu hoặc API khác)
+    //    int successAttempts = 0;
+    //    int failureAttempts = 0;
+
+    //    try
+    //    {
+    //        // Lấy trạng thái tường lửa
+    //        Process firewallProcess = new Process();
+    //        firewallProcess.StartInfo.FileName = "netsh";
+    //        firewallProcess.StartInfo.Arguments = "advfirewall show allprofiles";
+    //        firewallProcess.StartInfo.RedirectStandardOutput = true;
+    //        firewallProcess.StartInfo.UseShellExecute = false;
+    //        firewallProcess.StartInfo.CreateNoWindow = true;
+    //        firewallProcess.Start();
+    //        string firewallOutput = firewallProcess.StandardOutput.ReadToEnd();
+    //        firewallProcess.WaitForExit();
+
+    //        if (firewallOutput.Contains("State                                 ON"))
+    //        {
+    //            firewallStatus = "active";
+    //        }
+
+    //        // Lấy thông tin đăng nhập từ Event Log
+    //        EventLog eventLog = new EventLog("Security");
+
+    //        foreach (EventLogEntry entry in eventLog.Entries.Cast<EventLogEntry>())
+    //        {
+    //            // Mã sự kiện đăng nhập thành công là 4624, thất bại là 4625
+    //            if (entry.InstanceId == 4624) // Success
+    //            {
+    //                successAttempts++;
+    //            }
+    //            else if (entry.InstanceId == 4625) // Failure
+    //            {
+    //                failureAttempts++;
+    //            }
+    //        }
+    //    }
+    //    catch (Exception ex)
+    //    {
+    //        Console.WriteLine("Lỗi khi lấy thông tin bảo mật: " + ex.Message);
+    //    }
+
+    //    // Tạo và trả về thông tin bảo mật
+    //    return new SystemSecurityInfo
+    //    {
+    //        FirewallStatus = firewallStatus,
+    //        BlockedAttempts = blockedAttempts,
+    //        LoginAttempts = new LoginAttemptInfo
+    //        {
+    //            Success = successAttempts,
+    //            Failure = failureAttempts
+    //        }
+    //    };
+    //}
 }

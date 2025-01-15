@@ -53,19 +53,33 @@ public class WebSocketMiddleware
     public static async Task BroadcastMessageAsync(string message)
     {
         Console.WriteLine($"Attempting to send message: {message}");
+        var socketsToRemove = new List<WebSocket>();
         foreach (var socket in _sockets.ToList())
         {
             if (socket.State == WebSocketState.Open)
             {
-                var messageBytes = Encoding.UTF8.GetBytes(message);
-                await socket.SendAsync(new ArraySegment<byte>(messageBytes), WebSocketMessageType.Text, true, CancellationToken.None);
-                Console.WriteLine("Message sent: " + message);
+                try
+                {
+                    var messageBytes = Encoding.UTF8.GetBytes(message);
+                    await socket.SendAsync(new ArraySegment<byte>(messageBytes), WebSocketMessageType.Text, true, CancellationToken.None);
+                    Console.WriteLine("Message sent: " + message);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Error sending message to socket: " + ex.Message);
+                    socketsToRemove.Add(socket);
+                }
             }
             else
             {
                 Console.WriteLine("WebSocket is not connected.");
-                _sockets.Remove(socket);
+                socketsToRemove.Add(socket);
             }
+        }
+        // Remove closed or errored sockets from the list
+        foreach (var socket in socketsToRemove)
+        {
+            _sockets.Remove(socket);
         }
     }
 }

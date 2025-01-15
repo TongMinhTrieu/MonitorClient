@@ -1,33 +1,46 @@
-﻿using Microsoft.AspNetCore.Http;
+﻿using Microsoft.Extensions.Hosting;
+using PacketDotNet;
+using PcapDotNet.Core;
+using PcapDotNet.Packets;
+using SharpPcap;
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 using System.Threading.Tasks;
-using PacketDotNet;
-using SharpPcap;
 
-
-public class ApiMonitoringMiddleware
+public class PacketCaptureService : IHostedService
 {
-    private readonly RequestDelegate _next;
-    public List<string> listAPI;
+    private readonly List<string> _listAPI;
+    private readonly Timer _resetTimer;
 
-    public ApiMonitoringMiddleware(RequestDelegate next)
+    public PacketCaptureService()
     {
-        _next = next;
-        listAPI = new List<string>();
+        _listAPI = new List<string>();
     }
 
-    public async Task InvokeAsync(HttpContext context)
+    public List<string> GetCapturedRequests()
     {
-        // Chạy bắt gói tin trong một tác vụ song song
-        await Task.Run(() => StartPacketCapture());
-
-        // Tiếp tục xử lý các middleware khác
-        await _next(context);
+        return new List<string>(_listAPI);  // Trả về bản sao của list để bảo vệ dữ liệu gốc
     }
 
-    public void StartPacketCapture()
+    // Lệnh bắt gói tin trong background task
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        Task.Run(() => StartPacketCapture(), cancellationToken);
+        return Task.CompletedTask;
+    }
+
+    // Dừng việc bắt gói tin khi ứng dụng dừng
+    public Task StopAsync(CancellationToken cancellationToken)
+    {
+        // Bạn có thể thêm logic dừng các công việc đang chạy ở đây nếu cần
+        return Task.CompletedTask;
+    }
+
+    private void StartPacketCapture()
     {
         // Lấy danh sách các adapter mạng
         var devices = CaptureDeviceList.Instance;
@@ -68,6 +81,7 @@ public class ApiMonitoringMiddleware
             // Lấy dữ liệu gói tin
             var rawPacket = e.GetPacket();
             var packet = PacketDotNet.Packet.ParsePacket(rawPacket.LinkLayerType, rawPacket.Data);
+
             // Kiểm tra xem có phải là gói tin IP không
             var ipPacket = packet.PayloadPacket as IPPacket; //ethernetPacket
             if (ipPacket != null)
@@ -90,11 +104,11 @@ public class ApiMonitoringMiddleware
                             // Gộp thành một dòng duy nhất: GET localhost:2112/api/test HTTP/1.1
                             string result = $"{methodAndPath.Groups[1].Value} {host.Groups[1].Value}{methodAndPath.Groups[2].Value} HTTP/1.1";
                             // Thêm kết quả vào list
-                            listAPI.Add(result);
+                            _listAPI.Add(result);
                             Console.WriteLine(result);
                         }
                     }
-                }                
+                }
             }
         }
         catch (Exception ex)
@@ -124,12 +138,13 @@ public class ApiMonitoringMiddleware
             return filteredDevices;
         }
 
-        return null;       
+        return null;
     }
 
-    // Getter để lấy danh sách listAPI
-    public List<string> GetCapturedRequests()
+    public void ResetList()
     {
-        return listAPI;
+        _listAPI.Clear();
     }
+
+    
 }

@@ -3,6 +3,7 @@ using Microsoft.Extensions.DependencyInjection.Extensions;
 using Serilog;
 using Serilog.Events;
 using ServerMonitor.Middlewares;
+using ServerMonitor.Services;
 using System.ComponentModel;
 
 

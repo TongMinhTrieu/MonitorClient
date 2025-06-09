@@ -1,33 +1,29 @@
-﻿using Microsoft.Extensions.DependencyInjection;
-using Microsoft.Extensions.DependencyInjection.Extensions;
+﻿using Microsoft.Extensions.Caching.Memory;
 using Serilog;
-using Serilog.Events;
+using Serilog.Core;
+using ServerMonitor.Datas;
 using ServerMonitor.Middlewares;
 using ServerMonitor.Services;
-using System.ComponentModel;
 
-
+Directory.SetCurrentDirectory(AppDomain.CurrentDomain.BaseDirectory);
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddWindowsService(options =>
 {
     options.ServiceName = "ServerMonitor";
 });
+builder.Services.AddHttpClient();
+builder.Services.AddMemoryCache();
+
 // Add services to the container.
+builder.Services.AddSingleton<ILogService, LogService>();
+
 builder.Services.AddHostedService<SystemInfoService>();
+builder.Services.AddHostedService<TcpCheckService>();
 
-builder.Host.UseSerilog((context, configuration) =>
-{
-    // Đường dẫn log động
-    var logDirectory = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "Logs");
-    Directory.CreateDirectory(logDirectory); // Tạo thư mục nếu chưa tồn tại
-
-    configuration
-        .ReadFrom.Configuration(context.Configuration)
-        .WriteTo.File(
-            path: Path.Combine(logDirectory, "log-.txt"),
-            rollingInterval: RollingInterval.Day,
-            outputTemplate: "{Timestamp:yyyy-MM-dd HH:mm:ss} [{Level:u3}] {Message:lj}{NewLine}{Exception}");
-});
+GlobalData.TryGetLogPath(builder.Configuration);
+Logger logger = new LoggerConfiguration().ReadFrom.Configuration(builder.Configuration).Enrich.FromLogContext().CreateLogger();
+builder.Logging.ClearProviders();
+builder.Logging.AddSerilog(logger);
 
 
 builder.Services.AddControllers();
@@ -37,7 +33,7 @@ builder.Services.AddControllers();
 builder.Services.AddEndpointsApiExplorer();
 
 var app = builder.Build();
-
+GlobalData.Cache = app.Services.GetRequiredService<IMemoryCache>();
 //app.UseMiddleware<ResponseTimeMiddleware>();
 app.UseMiddleware<ErrorRateMiddleware>();
 app.UseMiddleware<RequestCounterMiddleware>();

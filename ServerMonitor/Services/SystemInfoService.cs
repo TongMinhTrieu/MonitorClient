@@ -11,8 +11,7 @@ using ServerMonitor.Models;
 using LibreHardwareMonitor.Hardware;
 using System.Text.Json;
 using Microsoft.Web.Administration;
-using System.Linq;
-using System.Security.Cryptography;
+using LogLevel = ServerMonitor.Enum.LogLevel;
 
 namespace ServerMonitor.Services
 {
@@ -26,8 +25,10 @@ namespace ServerMonitor.Services
         private readonly int _reconnect; // Thời gian chờ giữa các lần thử kết nối lại
         private readonly int _period;   // Chu kỳ gửi
         private readonly string? _adapter;
-        private readonly ILogger<SystemInfoService> _logger;
+        private readonly ILogService logService;
+        private readonly string caller;
         private readonly List<ApiStatistics> _apistatistics = [];
+        private readonly string _agentPassword;
         private readonly HttpClient _httpClient = new();
 
         private readonly string? _connectionstring;
@@ -38,10 +39,11 @@ namespace ServerMonitor.Services
 
         private readonly Computer _computer;
         private readonly string clientIp = "0.0.0.0";
+        
 
         private static volatile SQLMonitor sqlMonitor = new() { IsConnect = 0, ResponseTime = -1};
 
-        public SystemInfoService(IConfiguration configuration, ILogger<SystemInfoService> logger)
+        public SystemInfoService(IConfiguration configuration, ILogService logService)
         {
             _webSocketUrl = configuration["WebSocket:Url"];
             _webSocketClient = new ClientWebSocket();
@@ -57,7 +59,7 @@ namespace ServerMonitor.Services
             _peakHours = configuration.GetSection("SQLMonitor:PeakHours").Get<List<PeakHour>>() ?? [];
             clientIp = GetLocalIpAddress();
             _adapter = configuration["Adapter:Name"];
-            _logger = logger;
+            _agentPassword = configuration["AgentPassword"] ?? "Mercurian1104&Myrrh0505@131211#";
 
 
             // Khởi tạo đối tượng Computer và bật các cảm biến
@@ -67,10 +69,13 @@ namespace ServerMonitor.Services
             };
 
             _computer.Open();
+            this.logService = logService;
+            caller = ((GetType().Namespace?.Split('.') ?? []).LastOrDefault() + "." ?? "Unknown.") + GetType().Name;
         }
 
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-        {            
+        {
+            string message;
             bool isFirstrun = true;
             double count = _interval / 2;
             ICaptureDevice? selectedAdapter = GetAdapterWithKeyword();
@@ -78,10 +83,11 @@ namespace ServerMonitor.Services
 
             if (_connectionstring == null)
             {
-                _logger.LogInformation("Không có chuỗi Connection. Sẽ không lấy các thông số SQL");
+                message = "Không có chuỗi Connection. Sẽ không lấy các thông số SQL";
+                logService.Logging(LogLevel.Debug, message, caller);
             }
             // Lưu trạng thái ổ đĩa trước đó
-
+            int _numCountLogAdapter = 0;
             List<(string, double, double)>? listDatabases = [("NoDatabase",0 ,0)];
             int numberOfSQLConnections = 0;
 
@@ -161,7 +167,8 @@ namespace ServerMonitor.Services
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogError($"Không thể Lấy thông số SQLMonitor. Lỗi: {ex.Message}");
+                        message = $"Không thể lấy thông số SQLMonitor. Lỗi: {ex.Message}";
+                        logService.Logging(LogLevel.Error, message, caller);
                     }
                     
                 }
@@ -201,7 +208,12 @@ namespace ServerMonitor.Services
                     else
                     {
                         Console.WriteLine("No suitable adapter found.");
-                        _logger.LogWarning("Không tìm thấy Adapter phù hợp");
+                        if (_numCountLogAdapter == 0)
+                        {
+                            message = "Không tìm thấy Adapter phù hợp";
+                            logService.Logging(LogLevel.Debug, message, caller);
+                            _numCountLogAdapter += 1;
+                        }
                     }
 
                     // Lấy thông tin về các kết nối TCP hiện tại
@@ -291,7 +303,7 @@ namespace ServerMonitor.Services
                     }
 
                     List<SiteInfo> siteInfo = [];
-                    using (ServerManager serverManager = new ServerManager())
+                    using (ServerManager serverManager = new())
                     {
                         siteInfo = GetIISMetrics(serverManager);                      
                     }
@@ -327,8 +339,8 @@ namespace ServerMonitor.Services
                                 true,
                                 stoppingToken
                             );
-                            //Console.WriteLine("Sent: " + jsonMessage);
-                            //Console.WriteLine("Sent Data");
+                            // Console.WriteLine("Sent: " + jsonMessage);
+                            // Console.WriteLine("Sent Data");
                             // Clear the byte array to help the garbage collector reclaim memory more quickly
                             Array.Clear(messageBytes, 0, messageBytes.Length);
                             _apistatistics.Clear();
@@ -337,19 +349,22 @@ namespace ServerMonitor.Services
                         else
                         {
                             Console.WriteLine("WebSocket is not connected.");
-                            _logger.LogWarning("WebSocket mất kết nối");
+                            message = "WebSocket mất kết nối";
+                            logService.Logging(LogLevel.Debug, message, caller);
                         }
                     }
                     else
                     {
                         Console.WriteLine("_webSocketClient null.");
-                        _logger.LogWarning("_webSocketClient null");
+                        message = "_webSocketClient null";
+                        logService.Logging(LogLevel.Debug, message, caller);
                     }
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine("Error: " + ex.Message);
-                    _logger.LogError("Lỗi: {Message}", ex.Message);
+                    message = $"Lỗi: {ex.Message}";
+                    logService.Logging(LogLevel.Error, message, caller);
                     // Nếu có lỗi, đợi một khoảng thời gian trước khi thử lại kết nối
                     await Task.Delay(_reconnect, stoppingToken);
                 }
@@ -385,7 +400,8 @@ namespace ServerMonitor.Services
             catch (Exception ex)
             {
                 Console.WriteLine($"Ping error: {ex.Message}");
-                _logger.LogError("Ping lỗi: {Message}", ex.Message);
+                string message = $"Ping lỗi: {ex.Message}";
+                logService.Logging(LogLevel.Debug, message, caller);
             }
             // Nếu có lỗi hoặc không nhận được phản hồi, coi như kết nối đã ngắt
             return false;
@@ -394,6 +410,7 @@ namespace ServerMonitor.Services
         // Connect Web Socket
         private async Task ConnectWebSocketAsync(CancellationToken stoppingToken)
         {
+            string message;
             // Kết nối lại WebSocket khi không có kết nối
             try
             {
@@ -403,7 +420,7 @@ namespace ServerMonitor.Services
                 var requestBody = new
                 {
                     Ip = clientIp,
-                    Password = "Mercurian1104&Myrrh0505@131211#"
+                    Password = _agentPassword
                 };
                 // Chuyển đổi thành JSON
                 var json = JsonSerializer.Serialize(requestBody);
@@ -420,12 +437,14 @@ namespace ServerMonitor.Services
                         {
                             //Console.WriteLine("Đã đóng WebSocket trước khi kết nối lại.");
                             await _webSocketClient.CloseAsync(WebSocketCloseStatus.NormalClosure, "Reconnecting", stoppingToken);
-                            _logger.LogInformation("Đã đóng WebSocket trước khi kết nối lại.");
+                            message = "Đã đóng WebSocket trước khi kết nối lại.";
+                            logService.Logging(LogLevel.Debug, message, caller);
                         }
                         catch (Exception ex)
                         {
                             //Console.WriteLine($"Lỗi khi đóng WebSocket: {ex.Message}. Hủy kết nối ngay lập tức.");
-                            _logger.LogWarning($"Lỗi khi đóng WebSocket: {ex.Message}. Hủy kết nối ngay lập tức.");
+                            message = $"Lỗi khi đóng WebSocket: {ex.Message}. Hủy kết nối ngay lập tức.";
+                            logService.Logging(LogLevel.Debug, message, caller);
                             _webSocketClient.Abort();
                         }
                     }
@@ -435,17 +454,20 @@ namespace ServerMonitor.Services
 
                     await _webSocketClient.ConnectAsync(new Uri(url.Replace("http", "ws") + "/ws"), stoppingToken);
                     Console.WriteLine("WebSocket connected to " + url);
-                    _logger.LogInformation($"Kết nối đến Socket: {url}");
+                    message = $"Kết nối đến Socket: {url}";
+                    logService.Logging(LogLevel.Debug, message, caller);
                 }
                 else
                 {
-                    _logger.LogError($"Không thể kết nối đến: {url}. Lỗi: {response.StatusCode}");
+                    message = $"Không thể kết nối đến: {url}. Lỗi: {response.StatusCode}";
+                    logService.Logging(LogLevel.Error, message, caller);
                 }
             }
             catch (Exception ex)
             {
                 Console.WriteLine("Error connecting to WebSocket: " + ex.Message);
-                _logger.LogError($"Không thể kết nối đến Socket: {_webSocketUrl}, Lỗi: {ex.Message}");
+                message = $"Không thể kết nối đến Socket: {_webSocketUrl}, Lỗi: {ex.Message}";
+                logService.Logging(LogLevel.Error, message, caller);
             }
             // Đợi một khoảng thời gian trước khi thử lại kết nối
             await Task.Delay(_reconnect, stoppingToken);
@@ -509,6 +531,7 @@ namespace ServerMonitor.Services
         // Hàm bắt API theo adapter
         private void Device_OnPacketArrival(object sender, PacketCapture e)
         {
+            string message;
             try
             {
                 // Lấy dữ liệu gói tin
@@ -598,15 +621,18 @@ namespace ServerMonitor.Services
                                                 }
                                                 catch (Exception moduleEx)
                                                 {
-                                                    _logger.LogWarning($"PID: {pid}, Cannot access MainModule: {moduleEx.Message}");
+                                                    message = $"PID: {pid}, Cannot access MainModule: {moduleEx.Message}";
+                                                    logService.Logging(LogLevel.Debug, message, caller);
                                                     executablePath = "Unable to access";
                                                 }
                                             }
-                                            _logger.LogInformation($"PID: {pid}, Name: {processName}, Path: {executablePath}, Destination: {Direct}");
+                                            message = $"PID: {pid}, Name: {processName}, Path: {executablePath}, Destination: {Direct}";
+                                            logService.Logging(LogLevel.Debug, message, caller);
                                         }
                                         catch (Exception ex)
                                         {
-                                            _logger.LogInformation($"PID: {pid} - Error: {ex.Message}");
+                                            message = $"PID: {pid} - Error: {ex.Message}";
+                                            logService.Logging(LogLevel.Error, message, caller);
                                         }
                                     }
                                    
@@ -614,11 +640,13 @@ namespace ServerMonitor.Services
                                     if (refererMatch.Success)
                                     {
                                         string referer = refererMatch.Groups[1].Value;
-                                        _logger.LogInformation($"API: {apiFullPath}, Called by Referer: {referer}, PID: {pids.FirstOrDefault()}, Destination: {Direct}");
+                                        message = $"API: {apiFullPath}, Called by Referer: {referer}, PID: {pids.FirstOrDefault()}, Destination: {Direct}";
+                                        logService.Logging(LogLevel.Debug, message, caller);
                                     }
                                     else if (pids.Contains(4))
                                     {
-                                        _logger.LogInformation($"API: {apiFullPath}, Likely system-level request (PID 4), Destination: {Direct}");
+                                        message = $"API: {apiFullPath}, Likely system-level request (PID 4), Destination: {Direct}";
+                                        logService.Logging(LogLevel.Debug, message, caller);
                                     }
                                 }
 
@@ -655,23 +683,27 @@ namespace ServerMonitor.Services
             catch (Exception ex)
             {
                 Console.WriteLine($"Error while processing packet: {ex.Message}");
-                _logger.LogError($"Lỗi khi bắt gói tin: {ex.Message}");
+                message = $"Lỗi khi bắt gói tin: {ex.Message}";
+                logService.Logging(LogLevel.Error, message, caller);
             }
         }
 
         // Lấy Adapter theo Keyword từ appsetting
         public ICaptureDevice? GetAdapterWithKeyword()
         {
+            string message;
             // Lấy tất cả các adapter mạng
             var devices = CaptureDeviceList.Instance;
             foreach (var item in devices)
             {
-                _logger.LogInformation($"Adapter: {item.Description}");
+                message = $"Adapter: {item.Description}";
+                logService.Logging(LogLevel.Debug, message, caller);
             }
             if (devices.Count < 1)
             {
                 Console.WriteLine("No devices found!");
-                _logger.LogWarning("Không có Adapter mạng nào");
+                message = "Không có Adapter mạng nào";
+                logService.Logging(LogLevel.Debug, message, caller);
                 return null;
             }
 
@@ -684,7 +716,8 @@ namespace ServerMonitor.Services
             {
                 Console.WriteLine($"Select a device containing the keyword '{_adapter}':");
                 Console.WriteLine($"{filteredDevices.Description}");
-                _logger.LogInformation($"Bắt API từ Adapter: {filteredDevices.Description}");
+                message = $"Bắt API từ Adapter: {filteredDevices.Description}";
+                logService.Logging(LogLevel.Debug, message, caller);
                 return filteredDevices;
             }
 
@@ -695,7 +728,15 @@ namespace ServerMonitor.Services
         public static string GetLocalIpAddress()
         {
             using HttpClient client = new();
-            return client.GetStringAsync("https://ifconfig.me/ip").Result;
+            try
+            {
+                return client.GetStringAsync("https://ifconfig.me/ip").Result;
+            }
+            catch
+            {
+                // Sử dụng một dịch vụ công cộng để lấy IP WAN
+                return client.GetStringAsync("https://api.ipify.org/").Result;
+            }
         }
 
         // Lấy Danh sách Database và Dung lượng
@@ -780,7 +821,7 @@ namespace ServerMonitor.Services
             if (interfaces.Count == 0)
             {
                 Console.WriteLine("No active network interfaces found.");
-                _logger.LogWarning("Không có card mạng hoạt động.");
+                //_logger.LogWarning("Không có card mạng hoạt động.");
                 return networkSpeeds;
             }
 
@@ -851,10 +892,71 @@ namespace ServerMonitor.Services
                 }
                 catch (Exception ex)
                 {
-                    _logger.LogError($"Error retrieving metrics for {siteName}: {ex.Message}");
+                    string message = $"Lỗi khi lấy thông số site {siteName}: {ex.Message}";
+                    logService.Logging(LogLevel.Error, message, caller);
                 }
             }
             return ListInfo;
+        }
+
+        public readonly Dictionary<int, PerformanceCounter> cpuCounters = [];
+        // Lấy CPU từng site IIS
+        public double GetCPUUsage(int processId)
+        {
+            try
+            {
+                if (!cpuCounters.ContainsKey(processId))
+                {
+                    string instanceName = GetProcessInstanceName(processId);
+                    cpuCounters[processId] = new PerformanceCounter("Process", "% Processor Time", instanceName, true);
+                    cpuCounters[processId].NextValue(); // Lần đầu NextValue() luôn về 0
+                }
+
+                double cpuUsage = Math.Round(cpuCounters[processId].NextValue() / Environment.ProcessorCount, 2);
+                return Math.Max(cpuUsage, 0.1f);
+            }
+            catch (Exception e)
+            {
+                string message = $"Lỗi khi lấy thông số CPU của Site: {e.Message}";
+                logService.Logging(LogLevel.Error, message, caller);
+                return 0;
+            }
+        }
+
+        // Lấy Ram từng site IIS
+        public double GetRAMUsage(int processId)
+        {
+            try
+            {
+                if (!ramCounters.ContainsKey(processId))
+                {
+                    string instanceName = GetProcessInstanceName(processId);
+                    ramCounters[processId] = new PerformanceCounter("Process", "Working Set", instanceName, true);
+                }
+                return Math.Round(ramCounters[processId].NextValue() / (1024 * 1024), 2);
+            }
+            catch (Exception e)
+            {
+                string message = $"Lỗi khi lấy thông số RAM của Site: {e.Message}";
+                logService.Logging(LogLevel.Error, message, caller);
+                return 0;
+            }
+        }
+
+        // Lấy Connection từng site IIS
+        public float GetCurrentConnections(string siteName)
+        {
+            try
+            {
+                using PerformanceCounter counter = new("Web Service", "Current Connections", siteName);
+                return counter.NextValue();
+            }
+            catch (Exception e)
+            {
+                string message = $"Lỗi khi lấy Connection của Site: {e.Message}";
+                logService.Logging(LogLevel.Error, message, caller);
+                return 0;
+            }
         }
 
         // Lấy PID từng site IIS
@@ -884,42 +986,6 @@ namespace ServerMonitor.Services
         //    var process = workerProcesses.FirstOrDefault(wp => wp.AppPoolName == appPoolName);
         //    return process?.ProcessId ?? 0;
         //}
-
-        // Lấy Connection từng site IIS
-        public float GetCurrentConnections(string siteName)
-        {
-            try
-            {
-                using PerformanceCounter counter = new("Web Service", "Current Connections", siteName);
-                return counter.NextValue();
-            }
-            catch
-            {
-                return 0;
-            }
-        }
-
-        public readonly Dictionary<int, PerformanceCounter> cpuCounters = [];
-        // Lấy CPU từng site IIS
-        public double GetCPUUsage(int processId)
-        {
-            try
-            {
-                if (!cpuCounters.ContainsKey(processId))
-                {
-                    string instanceName = GetProcessInstanceName(processId);
-                    cpuCounters[processId] = new PerformanceCounter("Process", "% Processor Time", instanceName, true);
-                    cpuCounters[processId].NextValue(); // Lần đầu NextValue() luôn về 0
-                }
-
-                double cpuUsage = Math.Round(cpuCounters[processId].NextValue() / Environment.ProcessorCount, 2);
-                return Math.Max(cpuUsage, 0.1f);
-            }
-            catch
-            {
-                return 0;
-            }
-        }
 
         // Lấy name theo PID từng site IIS
         public string GetProcessInstanceName(int processId)
@@ -951,25 +1017,7 @@ namespace ServerMonitor.Services
 
         public readonly Dictionary<int, PerformanceCounter> ramCounters = [];
 
-        // Lấy Ram từng site IIS
-        public double GetRAMUsage(int processId)
-        {
-            try
-            {
-                if (!ramCounters.ContainsKey(processId))
-                {
-                    string instanceName = GetProcessInstanceName(processId);
-                    ramCounters[processId] = new PerformanceCounter("Process", "Working Set", instanceName, true);
-                }
-                return Math.Round(ramCounters[processId].NextValue() / (1024 * 1024), 2);
-            }
-            catch
-            {
-                return 0;
-            }
-        }
-
-        // Hàm không check kết nối trong giờ cao điểm (Thời gian từ Server trả về qua hàm Post xác thực)
+        // Hàm không check kết nối trong giờ cao điểm
         public static bool IsPeakHour(List<PeakHour> peakHours)
         {
             TimeSpan now = DateTime.Now.TimeOfDay;
@@ -986,6 +1034,7 @@ namespace ServerMonitor.Services
         // Hàm check connect SQL
         public async Task<SqlConnection?> TryGetSQLConnection(string connectionString, int maxRetries)
         {
+            string message;
             int retryCount = 0;
             while (retryCount < maxRetries)
             {
@@ -999,10 +1048,12 @@ namespace ServerMonitor.Services
                 catch (Exception ex)
                 {
                     retryCount++;
-                    _logger.LogInformation($"Loi ket noi SQL (lan {retryCount}/{maxRetries}): {ex.Message}");
+                    message = $"Lỗi kết nối SQL (lần {retryCount}/{maxRetries}): {ex.Message}";
+                    logService.Logging(LogLevel.Error, message, caller);
                     if (retryCount >= maxRetries)
                     {
-                        _logger.LogError($"Canh bao: Khong the ket noi SQL sau {maxRetries} lan thu!");
+                        message = $"Cảnh báo: Không thể kết nói SQL sau {maxRetries} lần thử!";
+                        logService.Logging(LogLevel.Error, message, caller);
                         return null;
                     }
 
@@ -1030,7 +1081,8 @@ namespace ServerMonitor.Services
             }
             catch (Exception ex)
             {
-                _logger.LogError($"SQL Check Failed: {ex.Message}");
+                string message = $"SQL Check Failed: {ex.Message}";
+                logService.Logging(LogLevel.Error, message, caller);
                 return -1; // Trả về -1 nếu lỗi
             }
         }
